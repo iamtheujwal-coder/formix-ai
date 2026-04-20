@@ -14,11 +14,12 @@ export const createGoogleForm = async (
 
     const forms = google.forms({ version: "v1", auth });
 
-    // 1. Create the blank form
+    // 1. Create the blank form with title + description
     const createRes = await forms.forms.create({
       requestBody: {
         info: {
           title: formData.title,
+          documentTitle: formData.title,
         },
       },
     });
@@ -26,60 +27,155 @@ export const createGoogleForm = async (
     const formId = createRes.data.formId!;
     const responderUri = createRes.data.responderUri!;
 
-    // 2. Format questions for batchUpdate
-    const requests: forms_v1.Schema$Request[] = formData.questions.map(
-      (q: FormQuestion, index: number) => {
-        let item: forms_v1.Schema$Item = {
-          title: q.question,
-        };
+    // 2. Prepare requests: set description + add all questions
+    const requests: forms_v1.Schema$Request[] = [];
 
-        if (q.type === "short_text") {
+    // Set form description if provided
+    if (formData.description) {
+      requests.push({
+        updateFormInfo: {
+          info: {
+            description: formData.description,
+          },
+          updateMask: "description",
+        },
+      });
+    }
+
+    // 3. Format questions for batchUpdate
+    formData.questions.forEach((q: FormQuestion, index: number) => {
+      let item: forms_v1.Schema$Item = {
+        title: q.question,
+      };
+
+      switch (q.type) {
+        case "short_text":
           item.questionItem = {
             question: {
+              required: q.required ?? true,
               textQuestion: { paragraph: false },
             },
           };
-        } else if (q.type === "paragraph") {
+          break;
+
+        case "paragraph":
           item.questionItem = {
             question: {
+              required: q.required ?? false,
               textQuestion: { paragraph: true },
             },
           };
-        } else if (q.type === "multiple_choice") {
+          break;
+
+        case "multiple_choice":
           item.questionItem = {
             question: {
+              required: q.required ?? true,
               choiceQuestion: {
                 type: "RADIO",
-                options: q.options?.map((opt) => ({ value: opt })) || [
-                  { value: "Option 1" },
-                ],
+                options: (q.options || ["Option 1", "Option 2"]).map(
+                  (opt) => ({ value: opt })
+                ),
               },
             },
           };
-        }
+          break;
 
-        return {
-          createItem: {
-            item,
-            location: { index },
-          },
-        };
+        case "checkbox":
+          item.questionItem = {
+            question: {
+              required: q.required ?? false,
+              choiceQuestion: {
+                type: "CHECKBOX",
+                options: (q.options || ["Option 1", "Option 2"]).map(
+                  (opt) => ({ value: opt })
+                ),
+              },
+            },
+          };
+          break;
+
+        case "dropdown":
+          item.questionItem = {
+            question: {
+              required: q.required ?? true,
+              choiceQuestion: {
+                type: "DROP_DOWN",
+                options: (q.options || ["Option 1", "Option 2"]).map(
+                  (opt) => ({ value: opt })
+                ),
+              },
+            },
+          };
+          break;
+
+        case "scale":
+          item.questionItem = {
+            question: {
+              required: q.required ?? true,
+              scaleQuestion: {
+                low: q.scaleMin ?? 1,
+                high: q.scaleMax ?? 5,
+                lowLabel: q.scaleMinLabel || "",
+                highLabel: q.scaleMaxLabel || "",
+              },
+            },
+          };
+          break;
+
+        case "date":
+          item.questionItem = {
+            question: {
+              required: q.required ?? false,
+              dateQuestion: {
+                includeTime: false,
+                includeYear: true,
+              },
+            },
+          };
+          break;
+
+        case "section_header":
+          // Section headers use pageBreakItem
+          item = {
+            title: q.question,
+            pageBreakItem: {},
+          };
+          break;
+
+        default:
+          // Fallback to short text
+          item.questionItem = {
+            question: {
+              required: false,
+              textQuestion: { paragraph: false },
+            },
+          };
       }
-    );
 
-    // 3. Add questions to the form
+      requests.push({
+        createItem: {
+          item,
+          location: { index },
+        },
+      });
+    });
+
+    // 4. Execute batchUpdate
     if (requests.length > 0) {
       await forms.forms.batchUpdate({
         formId,
-        requestBody: {
-          requests,
-        },
+        requestBody: { requests },
       });
     }
 
     return { link: responderUri };
   } catch (error) {
     console.error("Google Forms API Error:", error);
-    throw new Error("Failed to create Google Form");
+    throw new Error(
+      error instanceof Error
+        ? `Failed to create Google Form: ${error.message}`
+        : "Failed to create Google Form"
+    );
   }
 };
