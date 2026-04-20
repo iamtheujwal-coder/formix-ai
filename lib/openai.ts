@@ -1,9 +1,12 @@
 import OpenAI from "openai";
 import { FormSchema, ConversationMessage } from "@/types/form";
 
+const apiKey = process.env.OPENAI_API_KEY || "";
+const isGroq = apiKey.startsWith("gsk_");
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "",
-  baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+  apiKey,
+  baseURL: process.env.OPENAI_BASE_URL || (isGroq ? "https://api.groq.com/openai/v1" : "https://api.openai.com/v1"),
 });
 
 const SYSTEM_PROMPT = `You are Formix AI, an expert form builder assistant. Convert the user's prompt into a strict JSON schema for a Google Form.
@@ -76,59 +79,71 @@ export const generateFormStream = async (
     { role: "user", content: prompt },
   ];
 
-  const stream = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-    messages,
-    stream: true,
-    temperature: 0.7,
-    max_tokens: 3000,
-    response_format: { type: "json_object" },
-  });
+  try {
+    const stream = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || (isGroq ? "llama-3.3-70b-versatile" : "gpt-4o-mini"),
+      messages,
+      stream: true,
+      temperature: 0.7,
+      max_tokens: 3000,
+      response_format: { type: "json_object" },
+    });
 
-  const encoder = new TextEncoder();
+    const encoder = new TextEncoder();
 
-  return new ReadableStream({
-    async start(controller) {
-      try {
-        let fullContent = "";
-        for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta?.content || "";
-          if (delta) {
-            fullContent += delta;
+    return new ReadableStream({
+      async start(controller) {
+        try {
+          let fullContent = "";
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta?.content || "";
+            if (delta) {
+              fullContent += delta;
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
+              );
+            }
+          }
+          // Send the final parsed schema
+          try {
+            const parsed = JSON.parse(fullContent);
+            if (!parsed.title || !Array.isArray(parsed.questions)) {
+              throw new Error("Invalid form schema structure from AI");
+            }
             controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
+              encoder.encode(
+                `data: ${JSON.stringify({ done: true, schema: parsed })}\n\n`
+              )
+            );
+          } catch {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ error: "AI produced an invalid structure. Please try again." })}\n\n`
+              )
             );
           }
-        }
-        // Send the final parsed schema
-        try {
-          const parsed = JSON.parse(fullContent);
-          if (!parsed.title || !Array.isArray(parsed.questions)) {
-            throw new Error("Invalid form schema structure from AI");
-          }
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : "Stream error occurred";
           controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ done: true, schema: parsed })}\n\n`
-            )
+            encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`)
           );
-        } catch {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ error: "AI produced an invalid structure. Please try again." })}\n\n`
-            )
-          );
+        } finally {
+          controller.close();
         }
-      } catch (err: unknown) {
-        const message =
-          err instanceof Error ? err.message : "Stream error occurred";
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`)
-        );
-      } finally {
-        controller.close();
-      }
-    },
-  });
+      },
+    });
+  } catch (error: any) {
+    console.error("AI Stream Generation Error:", error);
+    
+    // Handle 401 Unauthorized specifically
+    if (error?.status === 401) {
+      const provider = isGroq ? "Groq" : "OpenAI";
+      throw new Error(`Authentication failed (401): Your ${provider} API key is invalid or the base URL is misconfigured. Please check your .env.local or deployment settings.`);
+    }
+    
+    throw error;
+  }
 };
 
 // Non-streaming fallback (used for caching checks and demo mode)
@@ -151,7 +166,7 @@ export const generateForm = async (
 
   try {
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model: process.env.OPENAI_MODEL || (isGroq ? "llama-3.3-70b-versatile" : "gpt-4o-mini"),
       messages,
       response_format: { type: "json_object" },
       temperature: 0.7,
@@ -169,8 +184,15 @@ export const generateForm = async (
     const schema = parsed as FormSchema;
     setCachedResponse(prompt, schema);
     return schema;
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("AI Generation Error:", error);
+    
+    // Handle 401 Unauthorized specifically to help users with configuration
+    if (error?.status === 401) {
+      const provider = isGroq ? "Groq" : "OpenAI";
+      throw new Error(`Authentication failed (401): Your ${provider} API key is invalid or the base URL is misconfigured. Please check your .env.local or deployment settings.`);
+    }
+
     if (error instanceof Error) {
       throw new Error(`AI generation failed: ${error.message}`);
     }
