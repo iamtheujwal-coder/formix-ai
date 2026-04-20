@@ -10,6 +10,12 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: ["mongoose"],
+  // Explicitly set the root to avoid detecting parent lockfiles
+  experimental: {
+    turbo: {
+      root: "./",
+    },
+  },
 };
 
 export default nextConfig;

@@ -2,7 +2,9 @@ import Razorpay from "razorpay";
 import crypto from "crypto";
 
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-  console.warn("WARNING: Razorpay keys are missing in .env.local. Payments will fail.");
+  if (process.env.NODE_ENV === "development") {
+    console.warn("WARNING: Razorpay keys are missing in .env.local. Payments will fail.");
+  }
 }
 
 export const getRazorpayInstance = () => {
